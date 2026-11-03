@@ -1,0 +1,29 @@
+{
+  "name": "onenote-mcp",
+  "version": "0.1.0",
+  "description": "stdio MCP server exposing the local Microsoft OneNote desktop app (COM automation) as tools: list/read/search/create/update/append/publish/delete.",
+  "type": "module",
+  "main": "server.js",
+  "bin": {
+    "onenote-mcp": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "smoke": "node dev/live-smoke.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "onenote",
+    "com",
+    "notes",
+    "markdown"
+  ],
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0"
+  }
+}
