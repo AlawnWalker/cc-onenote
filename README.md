@@ -30,6 +30,26 @@ claude mcp add onenote -e ONENOTE_EXTRASECTIONS="[{\"name\":\"快速笔记\",\"p
 > 无别名时按 `sectionName: "KVM"` 会命中那个笔记本分区。
 > 独立分区本身不允许 `UpdateHierarchy` 改名（`0x8004200B SECTION_READ_ONLY`），所以别名只能写在配置里。
 
+## 作为 Claude Code 插件安装（发布版）
+
+仓库同时是一个 Claude Code 插件：内含本 MCP server、`skills/onenote` 技能和
+`.mcp.json`，用 `${CLAUDE_PLUGIN_ROOT}` 定位 `server.js`，不依赖机器上的绝对路径。
+
+```text
+/plugin marketplace add AlawnWalker/cc-onenote
+/plugin install cc-onenote@cc-onenote
+```
+
+- 首次启动由 `scripts/start.mjs` 在插件目录自动执行 `npm install --omit=dev`；
+  之后的会话直接启动。首次安装依赖需要联网。
+- 插件是 **Windows + OneNote 桌面版专用**。
+- 如果本机已经用 `claude mcp add onenote ...` 注册过同名 server，安装插件前先
+  `claude mcp remove onenote -s user`，避免两套同名工具。
+- 独立 `.one` 分区用 `~/.cc-onenote.json` 配置（见下），不需要改插件文件。
+- 在插件仓库根目录直接运行 Claude Code 时，Claude Code 会把根目录的 `.mcp.json`
+  同时当作项目级 MCP 配置，显示一个等待批准的 `onenote` 条目；这是开发时的副作用，
+  正常从其他目录使用插件不需要批准它。
+
 ## 配置（环境变量）
 
 | env | 默认 | 说明 |
@@ -39,6 +59,23 @@ claude mcp add onenote -e ONENOTE_EXTRASECTIONS="[{\"name\":\"快速笔记\",\"p
 | `ONENOTE_PAGECOLOR` | `#C7EDCC`（豆沙绿） | `#RRGGBB` / `automatic` / `none`；设空字符串 `""` 跟随 OneNote 默认 |
 | `ONENOTE_PAGESIZE` | 空（Automatic） | JSON 字符串，如 `{"width":1190,"height":842,"landscape":true}`，或 `"automatic"` |
 | `ONENOTE_EXTRASECTIONS` | `[]` | JSON 数组。**独立分区必须按 `path` 记**（ID 每次重启会变），如 `[{"name":"快速笔记","path":"<你的路径>\\快速笔记.one"}]` |
+
+### 用户配置文件（插件启动器）
+
+插件通过 `scripts/start.mjs` 启动；它在启动前读取 `~/.cc-onenote.json`
+（可用 `CC_ONENOTE_CONFIG` 覆盖路径），把键值写入环境变量，已存在的环境变量优先。
+数组/对象会序列化为 JSON，正好对应 `ONENOTE_EXTRASECTIONS` 这类配置：
+
+```json
+{
+  "ONENOTE_EXTRASECTIONS": [
+    { "name": "GICv3Virtualization", "path": "Z:\\...\\GICv3 虚拟化.one" }
+  ],
+  "ONENOTE_PAGECOLOR": "#C7EDCC"
+}
+```
+
+手动 `claude mcp add ... server.js` 的启动方式不经过这个启动器，仍需用 `-e` 传环境变量。
 
 ## 工具
 
