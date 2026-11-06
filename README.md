@@ -58,6 +58,11 @@ claude mcp add onenote -e ONENOTE_EXTRASECTIONS="[{\"name\":\"快速笔记\",\"p
 | `ONENOTE_TIMEOUT_MS` | `180000` | 单次调用超时；冷启动会拉起 OneNote，第一次可能 1–3 分钟 |
 | `ONENOTE_PAGECOLOR` | `#C7EDCC`（豆沙绿） | `#RRGGBB` / `automatic` / `none`；设空字符串 `""` 跟随 OneNote 默认 |
 | `ONENOTE_PAGESIZE` | 空（Automatic） | JSON 字符串，如 `{"width":1190,"height":842,"landscape":true}`，或 `"automatic"` |
+| `ONENOTE_CODE_PREFIX` | `│ ` | 代码块每行的前缀；设 `""` 会去掉竖线，但读回时无法识别为代码 |
+| `ONENOTE_ALIGN_COMMENT_COLUMN` | `0` | `0` 不处理 / `auto` 对齐到最长代码+2 / `N` 固定列（按字节算） |
+| `ONENOTE_ALIGN_COMMENT_MAX` | `80` | `auto` 对齐的列上限 |
+| `ONENOTE_BULLET_VALUE` | `1` | OneNote 项目符号字形索引（0 大黑圆、1 实心点 U+2022、3 空心圆、7 菱形） |
+| `ONENOTE_BULLET_VALUES` | `[]` | JSON 数组，按层级指定字形，如 `[20, 2]`；最后一项重复 |
 | `ONENOTE_EXTRASECTIONS` | `[]` | JSON 数组。**独立分区必须按 `path` 记**（ID 每次重启会变），如 `[{"name":"快速笔记","path":"<你的路径>\\快速笔记.one"}]` |
 
 ### 用户配置文件（插件启动器）
@@ -82,11 +87,12 @@ claude mcp add onenote -e ONENOTE_EXTRASECTIONS="[{\"name\":\"快速笔记\",\"p
 | 工具 | 关键参数 | 说明 |
 |---|---|---|
 | `onenote_list` | `notebook?` `section?` `includePages?` `includeRecycleBin?` `maxSections?` `maxPages?` | 笔记本 → 分区 → 页面树，返回所有 ID |
-| `onenote_read` | `pageId` 或 `sectionId`/`sectionName` + `pageTitle`、`maxBlocks?` | 读页面，转 Markdown |
+| `onenote_read` | `pageId` 或 `sectionId`/`sectionName` + `pageTitle`、`maxBlocks?`、`withIds?` | 读页面，转 Markdown；`withIds=true` 额外返回每个 block 的 `objectId`（供 `onenote_edit` 用） |
 | `onenote_search` | `query` `scopeId?` `limit?` `includeContent?` `maxScan?` | 自扫层级；标题子串（快），`includeContent=true` 再扫正文（约 50ms/页） |
 | `onenote_create` | `sectionId`/`sectionName`、`title`、`markdown` | 建页；标题也可由 markdown 的 `# 标题` 提供 |
 | `onenote_update` | 页面定位 + `title?` + `markdown` | 改写已有页：删掉原文本 Outline 后写新内容 |
 | `onenote_append` | 页面定位 + `markdown` | 页面末尾追加一个 Outline |
+| `onenote_edit` | 页面定位 + `mode` + `objectId`/`find` + 模式参数 | **原地改一个 block**：`replaceText`/`replaceBlock`/`insertAfter`/`deleteBlock`；只重发该 block 所在的 Outline，其余内容与格式不动 |
 | `onenote_publish` | 页面定位 + `path` + `format?` | 导出 `.one`/`.pdf`/`.docx`/`.xps`/`.mht`/`.html` 等 |
 | `onenote_delete` | 页面定位 + `permanent?` | 删页，默认进回收站 |
 | `onenote_create_section` | `path`（.one 绝对路径）、`keepBlankPage?` | 建/打开独立分区；新建时自动生成的空白页会删掉，`keepBlankPage=true` 保留 |

@@ -340,6 +340,9 @@ function Convert-RowsToTableXml($rows) {
         for ($i = 0; $i -lt $ncols; $i++) {
             $cell = ''
             if ($i -lt $cells.Count -and $null -ne $cells[$i]) { $cell = [string]$cells[$i] }
+            # OneNote entity-encodes ">" inside table cells and the entity shows up
+            # verbatim when the page is read back, so write the full-width form.
+            $cell = $cell.Replace('>', [string][char]0xFF1E)
             [void]$sb.Append('<one:Cell><one:OEChildren><one:OE><one:T>' + (ConvertTo-CData $cell) + '</one:T></one:OE></one:OEChildren></one:Cell>')
         }
         [void]$sb.Append('</one:Row>')
@@ -348,7 +351,17 @@ function Convert-RowsToTableXml($rows) {
     return $sb.ToString()
 }
 
-function Render-OENodes($nodes, $sb) {
+function Get-BulletValueForLevel([int]$depth) {
+    if ($null -ne $script:BulletValues -and $script:BulletValues.Count -gt 0) {
+        $index = $depth
+        if ($index -ge $script:BulletValues.Count) { $index = $script:BulletValues.Count - 1 }
+        if ($index -lt 0) { $index = 0 }
+        return [string]$script:BulletValues[$index]
+    }
+    return [string]$script:BulletValue
+}
+
+function Render-OENodes($nodes, $sb, [int]$depth = 0) {
     foreach ($node in $nodes) {
         $type = [string]$node.type
         if ($type -eq 'table') {
@@ -360,10 +373,11 @@ function Render-OENodes($nodes, $sb) {
         }
         $text = [string]$node.text
         $listXml = ''
+        $levelBullet = Get-BulletValueForLevel $depth
         if ($type -eq 'bullet') {
-            $listXml = '<one:List><one:Bullet bullet="2" fontSize="11.0"/></one:List>'
+            $listXml = '<one:List><one:Bullet bullet="' + $levelBullet + '" fontSize="11.0"/></one:List>'
         } elseif ($type -eq 'number') {
-            $listXml = '<one:List><one:Bullet bullet="2" fontSize="11.0"/></one:List>'
+            $listXml = '<one:List><one:Bullet bullet="' + $levelBullet + '" fontSize="11.0"/></one:List>'
             $ordinal = 1
             if ($null -ne $node.ordinal -and "$($node.ordinal)" -ne '') { $ordinal = [int]$node.ordinal }
             $text = "$ordinal. " + $text
@@ -378,7 +392,7 @@ function Render-OENodes($nodes, $sb) {
         $children = @($node.children)
         if ($null -ne $node.children -and $children.Count -gt 0) {
             $inner = New-Object System.Text.StringBuilder
-            Render-OENodes $children $inner
+            Render-OENodes $children $inner ($depth + 1)
             [void]$sb.Append('<one:OEChildren>' + $inner.ToString() + '</one:OEChildren>')
         }
         [void]$sb.Append('</one:OE>')
@@ -555,6 +569,7 @@ function Convert-ContainerToBlocks($container, [int]$level) {
         $localName = $child.LocalName
         if ($localName -eq 'OE') {
             $text = Get-DirectText $child
+            $oid = $child.GetAttribute('objectID')
             $kind = 'para'
             $list = $child.SelectSingleNode('./*[local-name()="List"]')
             if ($null -ne $list) {
@@ -570,10 +585,13 @@ function Convert-ContainerToBlocks($container, [int]$level) {
             }
             $table = $child.SelectSingleNode('./*[local-name()="Table"]')
             if ($null -ne $table) {
-                [void]$out.Add((Convert-TableToBlock $table))
+                $tableBlock = Convert-TableToBlock $table
+                $tableBlock['objectId'] = $oid
+                $tableBlock['outlineId'] = $script:CurrentOutlineId
+                [void]$out.Add($tableBlock)
             }
             if ($text -ne '') {
-                [void]$out.Add([ordered]@{ type = $kind; text = $text; level = $level })
+                [void]$out.Add([ordered]@{ type = $kind; text = $text; level = $level; objectId = $oid; outlineId = $script:CurrentOutlineId })
             }
             foreach ($kids in $child.SelectNodes('./*[local-name()="OEChildren"]')) {
                 $sub = Convert-ContainerToBlocks $kids ($level + 1)
@@ -608,6 +626,7 @@ function Convert-PageXmlToBlocks($doc) {
     foreach ($node in $doc.DocumentElement.ChildNodes) {
         if ($node.NodeType -ne 'Element') { continue }
         if ($node.LocalName -eq 'Outline') {
+            $script:CurrentOutlineId = $node.GetAttribute('objectID')
             foreach ($children in $node.SelectNodes('./*[local-name()="OEChildren"]')) {
                 $sub = Convert-ContainerToBlocks $children 0
                 foreach ($item in $sub) { [void]$blocks.Add($item) }
@@ -1057,6 +1076,167 @@ function Action-Update($params) {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Partial page editing
+# ---------------------------------------------------------------------------
+# UpdatePageContent is incremental: an element carrying an objectID replaces
+# exactly that object and leaves the rest of the page alone. A partial edit
+# therefore re-sends only the OUTLINE that owns the target block, with the
+# change applied and every sibling copied back verbatim.
+
+function Get-OwnerOutline($node) {
+    $cur = $node
+    while ($null -ne $cur) {
+        if ($cur.LocalName -eq 'Outline') { return $cur }
+        $cur = $cur.ParentNode
+    }
+    return $null
+}
+
+function New-CdataTextElement($doc, [string]$text) {
+    $t = $doc.CreateElement('one', 'T', $script:NS)
+    [void]$t.AppendChild($doc.CreateCDataSection($text))
+    return $t
+}
+
+function Action-Edit($params) {
+    $pageId = Resolve-PageId $params
+    $mode = [string]$params.mode
+    if ($mode -eq '') { Fail 'BAD_ARGUMENT' 'mode is required' }
+    $objectId = ''
+    if ($null -ne $params.objectId) { $objectId = [string]$params.objectId }
+    $find = ''
+    if ($null -ne $params.find) { $find = [string]$params.find }
+    if ($objectId -eq '' -and $find -eq '') {
+        Fail 'BAD_ARGUMENT' 'objectId or find is required (onenote_read with withIds=true gives objectIds)'
+    }
+
+    $app = Get-App
+    $xml = ''
+    $app.GetPageContent($pageId, [ref]$xml, 0)
+    $doc = New-XmlDoc $xml
+    $nm = New-NsMgr $doc
+
+    $target = $null
+    if ($objectId -ne '') {
+        foreach ($cand in $doc.SelectNodes('//one:OE', $nm)) {
+            if ($cand.GetAttribute('objectID') -eq $objectId) { $target = $cand; break }
+        }
+        if ($null -eq $target) { Fail 'NOT_FOUND' ('no outline element with objectID ' + $objectId) }
+    } else {
+        # Target by text: unique match required, so a partial edit can never hit
+        # the wrong paragraph.
+        $hits = @()
+        foreach ($cand in $doc.SelectNodes('//one:OE', $nm)) {
+            $text = Get-DirectText $cand
+            if ($text -ne '' -and $text.Contains($find)) { $hits += $cand }
+        }
+        if ($hits.Count -eq 0) { Fail 'NOT_FOUND' ('no block contains: ' + $find) }
+        if ($hits.Count -gt 1) { Fail 'AMBIGUOUS' ('find matches ' + $hits.Count + ' blocks; use objectId instead') }
+        $target = $hits[0]
+        $objectId = $target.GetAttribute('objectID')
+    }
+    $outline = Get-OwnerOutline $target
+    if ($null -eq $outline) { Fail 'NOT_FOUND' 'target block has no owning outline' }
+    $outlineId = $outline.GetAttribute('objectID')
+
+    # Detached copy of just that outline; the source document is never mutated.
+    $cloneDoc = New-XmlDoc ('<one:Page xmlns:one="' + $script:NS + '">' + $outline.OuterXml + '</one:Page>')
+    $cnm = New-NsMgr $cloneDoc
+    $clone = $cloneDoc.SelectSingleNode('//one:Outline', $cnm)
+    $cloneTarget = $null
+    foreach ($cand in $clone.SelectNodes('.//one:OE', $cnm)) {
+        if ($cand.GetAttribute('objectID') -eq $objectId) { $cloneTarget = $cand; break }
+    }
+    if ($null -eq $cloneTarget) { Fail 'NOT_FOUND' 'target block missing from the outline copy' }
+
+    $changed = 0
+    $deleteOutline = $false
+
+    if ($mode -eq 'replaceText') {
+        $search = [string]$params.search
+        $replacement = ''
+        if ($null -ne $params.replacement) { $replacement = [string]$params.replacement }
+        if ($search -eq '') { Fail 'BAD_ARGUMENT' 'search is required for replaceText' }
+        $all = $false
+        if ($null -ne $params.all) { $all = [bool]$params.all }
+        foreach ($t in @($cloneTarget.SelectNodes('./*[local-name()="T"]'))) {
+            $text = $t.InnerText
+            $idx = $text.IndexOf($search)
+            if ($idx -lt 0) { continue }
+            if ($all) {
+                $newText = $text.Replace($search, $replacement)
+                $changed += ([regex]::Matches($text, [regex]::Escape($search))).Count
+            } else {
+                $newText = $text.Substring(0, $idx) + $replacement + $text.Substring($idx + $search.Length)
+                $changed += 1
+            }
+            $t.RemoveAll()
+            [void]$t.AppendChild($cloneDoc.CreateCDataSection($newText))
+            if (-not $all) { break }
+        }
+        if ($changed -eq 0) { Fail 'NOT_FOUND' ('text not found in block ' + $objectId) }
+    } elseif ($mode -eq 'replaceBlock') {
+        $text = ''
+        if ($null -ne $params.text) { $text = [string]$params.text }
+        foreach ($t in @($cloneTarget.SelectNodes('./*[local-name()="T"]'))) { [void]$cloneTarget.RemoveChild($t) }
+        [void]$cloneTarget.AppendChild((New-CdataTextElement $cloneDoc $text))
+        $changed = 1
+    } elseif ($mode -eq 'insertAfter') {
+        $text = ''
+        if ($null -ne $params.text) { $text = [string]$params.text }
+        $kind = ''
+        if ($null -ne $params.kind) { $kind = [string]$params.kind }
+        $newOe = $cloneDoc.CreateElement('one', 'OE', $script:NS)
+        if ($kind -eq 'h2' -or $kind -eq 'h3') {
+            $base = Get-DocBaseFontSize $doc
+            if ($base -le 0) { $base = 12.0 }
+            $delta = 4
+            if ($kind -eq 'h3') { $delta = 2 }
+            $newOe.SetAttribute('style', ('font-size:' + (Format-PtSize ($base + $delta)) + ';'))
+        } elseif ($kind -eq 'bullet' -or $kind -eq 'number') {
+            # OneNote requires the bullet attribute; numbered entries are written
+            # the same way as on create (bullet marker + "N. " prefix text).
+            $list = $cloneDoc.CreateElement('one', 'List', $script:NS)
+            $marker = $cloneDoc.CreateElement('one', 'Bullet', $script:NS)
+            $marker.SetAttribute('bullet', $script:BulletValue)
+            $marker.SetAttribute('fontSize', '11.0')
+            [void]$list.AppendChild($marker)
+            [void]$newOe.AppendChild($list)
+            if ($kind -eq 'number') {
+                $ordinal = 1
+                if ($null -ne $params.ordinal) { $ordinal = [int]$params.ordinal }
+                $text = [string]$ordinal + '. ' + $text
+            }
+        }
+        [void]$newOe.AppendChild((New-CdataTextElement $cloneDoc $text))
+        [void]$cloneTarget.ParentNode.InsertAfter($newOe, $cloneTarget)
+        $changed = 1
+    } elseif ($mode -eq 'deleteBlock') {
+        [void]$cloneTarget.ParentNode.RemoveChild($cloneTarget)
+        if ($clone.SelectNodes('.//one:OE', $cnm).Count -eq 0) { $deleteOutline = $true }
+        $changed = 1
+    } else {
+        Fail 'BAD_ARGUMENT' ('unknown mode: ' + $mode)
+    }
+
+    if ($deleteOutline) {
+        if ($outlineId -ne '') { $app.DeletePageContent($pageId, $outlineId, 0, $true) }
+    } else {
+        $patch = '<?xml version="1.0"?><one:Page xmlns:one="' + $script:NS + '" ID="' + (ConvertTo-Attr $pageId) + '">' + $clone.OuterXml + '</one:Page>'
+        $app.UpdatePageContent($patch, 0)
+    }
+    return [ordered]@{
+        pageId         = $pageId
+        mode           = $mode
+        objectId       = $objectId
+        outlineId      = $outlineId
+        changed        = $changed
+        applied        = $true
+        outlineRemoved = $deleteOutline
+    }
+}
+
 function Action-Delete($params) {
     $pageId = Resolve-PageId $params
     $permanent = $false
@@ -1190,6 +1370,22 @@ try {
     # variables carry a [string] type constraint from the param block and would
     # silently coerce the whole request into its string representation.
     $payload = Read-JsonFile $Request
+    # OneNote bullet glyph index: 0 = big black circle, 1 = U+2022, 2 = U+2022,
+    # 3 = hollow circle, 6 = star, 7 = diamond, 20 = arrowhead.
+    $script:BulletValue = '1'
+    $script:BulletValues = @()
+    if ($null -ne $payload.params) {
+        if ($null -ne $payload.params.bulletValue) {
+            $script:BulletValue = [string]$payload.params.bulletValue
+        }
+        if ($null -ne $payload.params.bulletValues) {
+            $vals = @($payload.params.bulletValues)
+            if ($vals.Count -gt 0) {
+                $script:BulletValues = @($vals | ForEach-Object { [string]$_ })
+                $script:BulletValue = $script:BulletValues[0]
+            }
+        }
+    }
     $action = [string]$payload.action
     $params = $payload.params
     if ($null -eq $params) { $params = (New-Object PSObject) }
@@ -1200,6 +1396,7 @@ try {
         'create'  { $data = Action-Create $params }
         'update'  { $data = Action-Update $params }
         'append'  { $data = Action-Append $params }
+        'edit'    { $data = Action-Edit $params }
         'delete'  { $data = Action-Delete $params }
         'setcolor' { $data = Action-SetColor $params }
         'setsettings' { $data = Action-SetSettings $params }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 
 import { makeToolHandlers, renderResult } from "../lib/tools.js";
@@ -73,14 +74,15 @@ test("onenote_update forwards an explicit title and strips it from the body", as
 });
 
 test("onenote_publish validates the format and resolves relative paths", async () => {
-  const bridge = fakeBridge(() => ({ path: "out/p.one", bytes: 1 }));
+  const outPath = path.resolve("out", "p.one");
+  const bridge = fakeBridge(() => ({ path: outPath, bytes: 1 }));
   const handlers = makeToolHandlers({ bridge });
-  const bad = await handlers.onenote_publish({ pageId: "{PAGE}", path: "out/p.exe", format: "exe" });
+  const bad = await handlers.onenote_publish({ pageId: "{PAGE}", path: path.resolve("out", "p.exe"), format: "exe" });
   assert.equal(bad.ok, false);
   assert.equal(bad.code, "BAD_ARGUMENT");
   assert.equal(bridge.calls.length, 0);
 
-  const good = await handlers.onenote_publish({ pageId: "{PAGE}", path: "out/p.pdf", format: "pdf" });
+  const good = await handlers.onenote_publish({ pageId: "{PAGE}", path: path.resolve("out", "p.pdf"), format: "pdf" });
   assert.equal(good.ok, true);
   assert.equal(bridge.calls[0].params.format, "pdf");
 });
@@ -139,26 +141,129 @@ test("onenote_read forwards maxBlocks and surfaces truncation", async () => {
   assert.match(rendered[0].text, /截断/);
 });
 
-test("onenote_create_section forwards path and keepBlankPage", async () => {
-  const bridge = fakeBridge(() => ({ sectionId: "{SEC}", path: "notes/x.one", created: true }));
+test("onenote_create_section requires an absolute path and passes keepBlankPage", async () => {
+  const bridge = fakeBridge(() => ({ sectionId: "{SEC}", path: path.resolve("out", "a.one"), created: true, blankPageRemoved: false }));
   const handlers = makeToolHandlers({ bridge });
-  const result = await handlers.onenote_create_section({ path: "notes/x.one", keepBlankPage: true });
-  assert.equal(result.ok, true);
-  assert.equal(bridge.calls[0].action, "createsection");
-  assert.equal(bridge.calls[0].params.path, "notes/x.one");
-  assert.equal(bridge.calls[0].params.keepBlankPage, true);
-});
 
-test("onenote_rename_section requires sectionId or path", async () => {
-  const bridge = fakeBridge(() => ({ sectionId: "{SEC}", name: "new" }));
-  const handlers = makeToolHandlers({ bridge });
-  const blocked = await handlers.onenote_rename_section({ name: "new" });
-  assert.equal(blocked.ok, false);
-  assert.equal(blocked.code, "BAD_ARGUMENT");
+  const missing = await handlers.onenote_create_section({});
+  assert.equal(missing.ok, false);
+  assert.equal(missing.code, "BAD_ARGUMENT");
   assert.equal(bridge.calls.length, 0);
 
-  const ok = await handlers.onenote_rename_section({ sectionId: "{SEC}", name: "new" });
-  assert.equal(ok.ok, true);
+  const result = await handlers.onenote_create_section({ path: path.resolve("out", "a.one") });
+  assert.equal(result.ok, true);
+  assert.equal(bridge.calls[0].action, "createsection");
+  assert.equal(bridge.calls[0].params.path, path.resolve("out", "a.one"));
+  assert.equal(bridge.calls[0].params.keepBlankPage, false);
+});
+
+test("onenote_rename_section needs a target and a name", async () => {
+  const bridge = fakeBridge(() => ({ sectionId: "{SEC}", name: "新名" }));
+  const handlers = makeToolHandlers({ bridge });
+
+  const noTarget = await handlers.onenote_rename_section({ name: "新名" });
+  assert.equal(noTarget.ok, false);
+  assert.equal(noTarget.code, "BAD_ARGUMENT");
+
+  const noName = await handlers.onenote_rename_section({ sectionId: "{SEC}" });
+  assert.equal(noName.ok, false);
+  assert.equal(noName.code, "BAD_ARGUMENT");
+  assert.equal(bridge.calls.length, 0);
+
+  const result = await handlers.onenote_rename_section({ sectionId: "{SEC}", name: "新名" });
+  assert.equal(result.ok, true);
   assert.equal(bridge.calls[0].action, "renamesection");
-  assert.equal(bridge.calls[0].params.name, "new");
+  assert.equal(bridge.calls[0].params.name, "新名");
+});
+
+test("onenote_edit forwards replaceText to the bridge", async () => {
+  const bridge = fakeBridge(() => ({ pageId: "{PAGE}", mode: "replaceText", changed: 1 }));
+  const handlers = makeToolHandlers({ bridge });
+  const result = await handlers.onenote_edit({
+    pageId: "{PAGE}",
+    mode: "replaceText",
+    objectId: "{OE}",
+    search: "old",
+    replacement: "new",
+  });
+  assert.equal(result.ok, true);
+  const call = bridge.calls[0];
+  assert.equal(call.action, "edit");
+  assert.equal(call.params.mode, "replaceText");
+  assert.equal(call.params.objectId, "{OE}");
+  assert.equal(call.params.search, "old");
+  assert.equal(call.params.replacement, "new");
+  assert.equal(call.params.all, false);
+});
+
+test("onenote_edit rejects an unknown mode before touching the bridge", async () => {
+  const bridge = fakeBridge(() => ({ pageId: "{PAGE}" }));
+  const handlers = makeToolHandlers({ bridge });
+  const result = await handlers.onenote_edit({ pageId: "{PAGE}", mode: "rename", objectId: "{OE}" });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "BAD_ARGUMENT");
+  assert.equal(bridge.calls.length, 0);
+});
+
+test("onenote_edit requires an objectId", async () => {
+  const bridge = fakeBridge(() => ({ pageId: "{PAGE}" }));
+  const handlers = makeToolHandlers({ bridge });
+  const result = await handlers.onenote_edit({ pageId: "{PAGE}", mode: "deleteBlock" });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "BAD_ARGUMENT");
+  assert.equal(bridge.calls.length, 0);
+});
+
+test("onenote_edit insertAfter defaults the block kind to para", async () => {
+  const bridge = fakeBridge(() => ({ pageId: "{PAGE}", mode: "insertAfter", changed: 1 }));
+  const handlers = makeToolHandlers({ bridge });
+  const result = await handlers.onenote_edit({
+    pageId: "{PAGE}",
+    mode: "insertAfter",
+    objectId: "{OE}",
+    text: "inserted",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(bridge.calls[0].params.kind, "para");
+  assert.equal(bridge.calls[0].params.text, "inserted");
+});
+test("onenote_read withIds returns objectIds per block", async () => {
+  const bridge = fakeBridge(() => ({
+    pageId: "{PAGE}",
+    title: "T",
+    lastModified: "2026-11-06T00:00:00.000Z",
+    blockCount: 2,
+    blocks: [
+      { type: "para", text: "a", level: 0, objectId: "{A}" },
+      { type: "para", text: "b", level: 0, objectId: "{B}" },
+    ],
+  }));
+  const handlers = makeToolHandlers({ bridge });
+  const result = await handlers.onenote_read({ pageId: "{PAGE}", withIds: true });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data.blocks.map((block) => block.objectId), ["{A}", "{B}"]);
+});
+
+test("onenote_edit can target a block by unique text", async () => {
+  const bridge = fakeBridge(() => ({ pageId: "{PAGE}", mode: "replaceText", changed: 1 }));
+  const handlers = makeToolHandlers({ bridge });
+  const result = await handlers.onenote_edit({
+    pageId: "{PAGE}",
+    mode: "replaceText",
+    find: "beta",
+    search: "beta",
+    replacement: "BETA",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(bridge.calls[0].params.find, "beta");
+  assert.equal(bridge.calls[0].params.objectId, "");
+});
+
+test("onenote_edit rejects a call without objectId or find", async () => {
+  const bridge = fakeBridge(() => ({ pageId: "{PAGE}" }));
+  const handlers = makeToolHandlers({ bridge });
+  const result = await handlers.onenote_edit({ pageId: "{PAGE}", mode: "deleteBlock" });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "BAD_ARGUMENT");
+  assert.equal(bridge.calls.length, 0);
 });

@@ -68,7 +68,14 @@ export function createMcpServer({ handlers }) {
 async function main() {
   const config = readConfig(process.env);
   const bridge = new OneNoteBridge(config);
-  const handlers = makeToolHandlers({ bridge });
+  const handlers = makeToolHandlers({
+    bridge,
+    renderOptions: {
+      codePrefix: config.codePrefix,
+      alignCommentColumn: config.alignCommentColumn,
+      alignCommentMax: config.alignCommentMax,
+    },
+  });
   const server = createMcpServer({ handlers });
   const transport = new StdioServerTransport();
   await server.connect(transport);

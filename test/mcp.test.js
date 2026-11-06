@@ -59,7 +59,7 @@ test("tools/list advertises all 8 tools with standard JSON Schema", async () => 
   assert.ok(response, "tools/list response received");
   assert.equal(response.error, undefined);
   const tools = response.result.tools;
-  assert.equal(tools.length, 10);
+  assert.equal(tools.length, 11);
   assert.deepEqual(tools.map((t) => t.name).sort(), [...TOOL_NAMES].sort());
   for (const tool of tools) {
     assert.equal(tool.inputSchema.type, "object");

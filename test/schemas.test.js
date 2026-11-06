@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { TOOL_NAMES, TOOL_PARAMETERS, TOOL_REQUIRED, TOOL_DESCRIPTIONS, buildJsonSchema } from "../lib/schemas.js";
 
-test("the catalog exposes all 10 onenote tools", () => {
+test("the catalog exposes all 11 onenote tools", () => {
   assert.deepEqual(TOOL_NAMES, [
     "onenote_list",
     "onenote_read",
@@ -11,6 +11,7 @@ test("the catalog exposes all 10 onenote tools", () => {
     "onenote_create",
     "onenote_update",
     "onenote_append",
+    "onenote_edit",
     "onenote_publish",
     "onenote_delete",
     "onenote_create_section",
